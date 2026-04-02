@@ -1,0 +1,13 @@
+{
+  "name": "snake-online-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Snake mit Singleplayer, lokalem 2-Spieler-Modus und serverautoritativen Multiplayer-Räumen bis 4 Spieler.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
