@@ -224,6 +224,92 @@
     .actions {
       margin-top: 10px;
     }
+
+
+    .touch-toolbar {
+      margin-top: 10px;
+    }
+
+    .touch-controls {
+      margin-top: 14px;
+      border-top: 1px solid #2a2a2a;
+      padding-top: 12px;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    .touch-section {
+      display: none;
+    }
+
+    .touch-grid-wrap {
+      display: inline-block;
+      margin: 8px 12px;
+      vertical-align: top;
+    }
+
+    .touch-caption {
+      color: #ccc;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+
+    .touch-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 64px);
+      grid-template-rows: repeat(3, 64px);
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .touch-spacer {
+      width: 64px;
+      height: 64px;
+    }
+
+    .touch-btn {
+      width: 64px;
+      height: 64px;
+      padding: 0;
+      margin: 0;
+      font-size: 24px;
+      font-weight: bold;
+      border: 1px solid #555;
+      border-radius: 12px;
+      background: #222;
+      color: #fff;
+      touch-action: manipulation;
+    }
+
+    .touch-btn:active {
+      transform: scale(0.97);
+    }
+
+    .touch-dual-wrap {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    @media (max-width: 900px) {
+      body {
+        padding: 10px;
+      }
+
+      .wrapper {
+        width: auto !important;
+        max-width: 100%;
+      }
+
+      canvas {
+        max-width: 100%;
+        height: auto;
+      }
+    }
+
   </style>
 </head>
 <body>
@@ -346,6 +432,63 @@
         <button type="button" id="rematchButton" onclick="requestRematch()">Revanche</button>
         <button type="button" onclick="leaveOnlineRoomToMenu()">Menü</button>
       </div>
+
+      <div class="touch-toolbar">
+        <button type="button" id="touchToggleButton" onclick="toggleTouchControls()">Touch-Steuerung: Aus</button>
+      </div>
+
+      <div class="touch-controls" id="touchControls" style="display:none;">
+        <div class="touch-section" id="touchSingleSection">
+          <div class="touch-grid-wrap">
+            <div class="touch-caption" id="touchSingleCaption">Steuerung</div>
+            <div class="touch-grid">
+              <div class="touch-spacer"></div>
+              <button type="button" class="touch-btn" id="touchUp">▲</button>
+              <div class="touch-spacer"></div>
+              <button type="button" class="touch-btn" id="touchLeft">◀</button>
+              <div class="touch-spacer"></div>
+              <button type="button" class="touch-btn" id="touchRight">▶</button>
+              <div class="touch-spacer"></div>
+              <button type="button" class="touch-btn" id="touchDown">▼</button>
+              <div class="touch-spacer"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="touch-section" id="touchDualSection">
+          <div class="touch-dual-wrap">
+            <div class="touch-grid-wrap">
+              <div class="touch-caption">Spieler 1</div>
+              <div class="touch-grid">
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP1Up">▲</button>
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP1Left">◀</button>
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP1Right">▶</button>
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP1Down">▼</button>
+                <div class="touch-spacer"></div>
+              </div>
+            </div>
+
+            <div class="touch-grid-wrap">
+              <div class="touch-caption">Spieler 2</div>
+              <div class="touch-grid">
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP2Up">▲</button>
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP2Left">◀</button>
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP2Right">▶</button>
+                <div class="touch-spacer"></div>
+                <button type="button" class="touch-btn" id="touchP2Down">▼</button>
+                <div class="touch-spacer"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -391,6 +534,11 @@
     var localActionsEl = null;
     var onlineActionsEl = null;
     var rematchButtonEl = null;
+    var touchToggleButtonEl = null;
+    var touchControlsEl = null;
+    var touchSingleSectionEl = null;
+    var touchDualSectionEl = null;
+    var touchSingleCaptionEl = null;
 
     var gridSize = 24;
     var tileCount = 20;
@@ -429,6 +577,8 @@
     var onlineCountdownTimer = null;
     var multiplayerNicknameStorageKey = "snakeMultiplayerNickname";
     var onlineLeaveTarget = "";
+    var touchControlsStorageKey = "snakeTouchControlsEnabled";
+    var touchControlsEnabled = false;
 
     function setElementText(el, value) {
       if (!el) {
@@ -617,6 +767,171 @@
       return name;
     }
 
+    function loadTouchControlsPreference() {
+      var value = "";
+
+      try {
+        if (window.localStorage) {
+          value = localStorage.getItem(touchControlsStorageKey) || "";
+        }
+      } catch (e) {
+        value = "";
+      }
+
+      if (value === "1") {
+        touchControlsEnabled = true;
+      } else if (value === "0") {
+        touchControlsEnabled = false;
+      } else {
+        touchControlsEnabled = false;
+      }
+    }
+
+    function saveTouchControlsPreference() {
+      try {
+        if (window.localStorage) {
+          localStorage.setItem(touchControlsStorageKey, touchControlsEnabled ? "1" : "0");
+        }
+      } catch (e) {
+      }
+    }
+
+    function updateTouchToggleButton() {
+      if (!touchToggleButtonEl) {
+        return;
+      }
+      setElementText(touchToggleButtonEl, "Touch-Steuerung: " + (touchControlsEnabled ? "An" : "Aus"));
+    }
+
+    function updateTouchControlsVisibility() {
+      if (!touchControlsEl || !touchSingleSectionEl || !touchDualSectionEl) {
+        return;
+      }
+
+      updateTouchToggleButton();
+
+      if (!touchControlsEnabled || !(gameMode === 1 || gameMode === 2 || gameMode === 3)) {
+        touchControlsEl.style.display = "none";
+        touchSingleSectionEl.style.display = "none";
+        touchDualSectionEl.style.display = "none";
+        return;
+      }
+
+      touchControlsEl.style.display = "block";
+
+      if (gameMode === 2) {
+        touchSingleSectionEl.style.display = "none";
+        touchDualSectionEl.style.display = "block";
+      } else {
+        touchDualSectionEl.style.display = "none";
+        touchSingleSectionEl.style.display = "block";
+
+        if (touchSingleCaptionEl) {
+          if (gameMode === 3) {
+            setElementText(touchSingleCaptionEl, "Deine Steuerung");
+          } else {
+            setElementText(touchSingleCaptionEl, "Steuerung");
+          }
+        }
+      }
+    }
+
+    function setTouchControlsEnabled(enabled) {
+      touchControlsEnabled = !!enabled;
+      saveTouchControlsPreference();
+      updateTouchControlsVisibility();
+    }
+
+    function toggleTouchControls() {
+      setTouchControlsEnabled(!touchControlsEnabled);
+    }
+
+    function bindTouchButton(buttonId, handler) {
+      var el = document.getElementById(buttonId);
+      var wrapped;
+
+      if (!el) {
+        return;
+      }
+
+      wrapped = function (event) {
+        event = event || window.event;
+        if (event.preventDefault) event.preventDefault();
+        event.returnValue = false;
+        handler();
+        return false;
+      };
+
+      if (window.PointerEvent) {
+        el.addEventListener("pointerdown", wrapped, false);
+      } else if ("ontouchstart" in window) {
+        el.addEventListener("touchstart", wrapped, false);
+      } else {
+        el.addEventListener("mousedown", wrapped, false);
+        el.addEventListener("click", wrapped, false);
+      }
+    }
+
+    function initTouchControls() {
+      bindTouchButton("touchUp", function () {
+        if (gameMode === 1) {
+          setDirectionSingle("w");
+        } else if (gameMode === 3 && currentRoom && currentRoom.state === "playing") {
+          sendSocketMessage({ type: "set_direction", direction: "up" });
+        }
+      });
+
+      bindTouchButton("touchDown", function () {
+        if (gameMode === 1) {
+          setDirectionSingle("s");
+        } else if (gameMode === 3 && currentRoom && currentRoom.state === "playing") {
+          sendSocketMessage({ type: "set_direction", direction: "down" });
+        }
+      });
+
+      bindTouchButton("touchLeft", function () {
+        if (gameMode === 1) {
+          setDirectionSingle("a");
+        } else if (gameMode === 3 && currentRoom && currentRoom.state === "playing") {
+          sendSocketMessage({ type: "set_direction", direction: "left" });
+        }
+      });
+
+      bindTouchButton("touchRight", function () {
+        if (gameMode === 1) {
+          setDirectionSingle("d");
+        } else if (gameMode === 3 && currentRoom && currentRoom.state === "playing") {
+          sendSocketMessage({ type: "set_direction", direction: "right" });
+        }
+      });
+
+      bindTouchButton("touchP1Up", function () {
+        if (gameMode === 2) setDirectionPlayer1("up");
+      });
+      bindTouchButton("touchP1Down", function () {
+        if (gameMode === 2) setDirectionPlayer1("down");
+      });
+      bindTouchButton("touchP1Left", function () {
+        if (gameMode === 2) setDirectionPlayer1("left");
+      });
+      bindTouchButton("touchP1Right", function () {
+        if (gameMode === 2) setDirectionPlayer1("right");
+      });
+
+      bindTouchButton("touchP2Up", function () {
+        if (gameMode === 2) setDirectionPlayer2("w");
+      });
+      bindTouchButton("touchP2Down", function () {
+        if (gameMode === 2) setDirectionPlayer2("s");
+      });
+      bindTouchButton("touchP2Left", function () {
+        if (gameMode === 2) setDirectionPlayer2("a");
+      });
+      bindTouchButton("touchP2Right", function () {
+        if (gameMode === 2) setDirectionPlayer2("d");
+      });
+    }
+
     function initCanvasContext() {
       if (!canvas || typeof canvas.getContext !== "function") {
         alert("Dein Browser unterstützt Canvas nicht. Bitte öffne die Seite in einem modernen Browser.");
@@ -705,6 +1020,7 @@
 
       setWrapperWidth(560);
       updateRecordDisplay();
+      updateTouchControlsVisibility();
     }
 
     function showMultiplayerBrowser() {
@@ -747,6 +1063,7 @@
         if (onlineInfoEl) onlineInfoEl.style.display = "none";
         setElementText(controlsTextEl, "2 Spieler: Spieler 1 = Pfeiltasten oder NUM-Pad 8 4 5 6 | Spieler 2 = W A S D | Neustart: Leertaste");
       }
+      updateTouchControlsVisibility();
     }
 
     function showOnlineGamePanel() {
@@ -763,6 +1080,7 @@
       if (localActionsEl) localActionsEl.style.display = "none";
       setElementText(controlsTextEl, "Online-Steuerung: W A S D, Pfeiltasten oder NUM-Pad 8 4 5 6");
       updateOnlinePanels();
+      updateTouchControlsVisibility();
     }
 
     function updateOnlinePanels() {
@@ -1753,6 +2071,11 @@
       localActionsEl = document.getElementById("localActions");
       onlineActionsEl = document.getElementById("onlineActions");
       rematchButtonEl = document.getElementById("rematchButton");
+      touchToggleButtonEl = document.getElementById("touchToggleButton");
+      touchControlsEl = document.getElementById("touchControls");
+      touchSingleSectionEl = document.getElementById("touchSingleSection");
+      touchDualSectionEl = document.getElementById("touchDualSection");
+      touchSingleCaptionEl = document.getElementById("touchSingleCaption");
 
       if (!canvas) {
         alert("Canvas mit ID 'game' wurde nicht gefunden.");
@@ -1766,6 +2089,9 @@
       nicknameInputEl.onchange = saveNickname;
       nicknameInputEl.onkeyup = saveNickname;
 
+      loadTouchControlsPreference();
+      initTouchControls();
+      updateTouchControlsVisibility();
       loadSavedNickname();
       initHighscoreFilePath();
       loadHighscore();
