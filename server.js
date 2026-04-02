@@ -6,16 +6,21 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const MAX_PLAYERS = 4;
+const MAX_ACTIVE_PLAYERS = 4;
 const MAP_SIZE = 40;
-const TICK_MS = 125;
-
+const TICK_MS = 100;
+const HEARTBEAT_INTERVAL_MS = 5000;
 const COLOR_SET = [
-  { head: '#66ccff', body: '#3399ff' },
-  { head: '#7CFC00', body: '#32CD32' },
-  { head: '#ffb347', body: '#ff8c42' },
-  { head: '#ff7ad9', body: '#e056c2' }
+  { id: 'blue', label: 'Blau', head: '#66ccff', body: '#3399ff' },
+  { id: 'green', label: 'Grün', head: '#7CFC00', body: '#32CD32' },
+  { id: 'orange', label: 'Orange', head: '#ffb347', body: '#ff8c42' },
+  { id: 'pink', label: 'Pink', head: '#ff7ad9', body: '#e056c2' },
+  { id: 'red', label: 'Rot', head: '#ff6b6b', body: '#ff3b3b' },
+  { id: 'purple', label: 'Lila', head: '#b388ff', body: '#8c5cff' },
+  { id: 'yellow', label: 'Gelb', head: '#ffe066', body: '#ffcc00' },
+  { id: 'teal', label: 'Türkis', head: '#4dd0e1', body: '#00acc1' }
 ];
+const MAX_ROOM_MEMBERS = COLOR_SET.length;
 
 const SPAWNS = [
   { x: 10, y: 34, direction: { x: 0, y: -1 } },
@@ -45,12 +50,6 @@ function send(client, payload) {
   client.ws.send(JSON.stringify(payload));
 }
 
-function broadcast(payload) {
-  clients.forEach(function (client) {
-    send(client, payload);
-  });
-}
-
 function randomId(size) {
   return crypto.randomBytes(size).toString('hex');
 }
@@ -60,7 +59,7 @@ function makeRoomId() {
   let roomId = '';
   do {
     roomId = '';
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 5; i += 1) {
       roomId += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
     }
   } while (rooms.has(roomId));
@@ -87,6 +86,50 @@ function sanitizeRoomName(name) {
     name = name.substring(0, 30);
   }
   return name;
+}
+
+function getColorById(colorId) {
+  for (let i = 0; i < COLOR_SET.length; i += 1) {
+    if (COLOR_SET[i].id === colorId) {
+      return COLOR_SET[i];
+    }
+  }
+  return null;
+}
+
+function getUsedColorIds(room, excludeId) {
+  const used = new Set();
+  room.memberOrder.forEach(function (memberId) {
+    const member = room.members.get(memberId);
+    if (!member || memberId === excludeId) {
+      return;
+    }
+    if (member.colorId) {
+      used.add(member.colorId);
+    }
+  });
+  return used;
+}
+
+function getFirstFreeColorId(room, excludeId) {
+  const used = getUsedColorIds(room, excludeId);
+  for (let i = 0; i < COLOR_SET.length; i += 1) {
+    if (!used.has(COLOR_SET[i].id)) {
+      return COLOR_SET[i].id;
+    }
+  }
+  return null;
+}
+
+function reserveColorId(room, requestedColorId, excludeId) {
+  const requested = getColorById(requestedColorId);
+  const used = getUsedColorIds(room, excludeId);
+
+  if (requested && !used.has(requested.id)) {
+    return requested.id;
+  }
+
+  return getFirstFreeColorId(room, excludeId);
 }
 
 function wrapPosition(pos) {
@@ -118,7 +161,7 @@ function isPositionInBody(pos, body, ignoreTail) {
   if (ignoreTail && max > 0) {
     max -= 1;
   }
-  for (let i = 0; i < max; i++) {
+  for (let i = 0; i < max; i += 1) {
     if (body[i].x === pos.x && body[i].y === pos.y) {
       return true;
     }
@@ -126,95 +169,173 @@ function isPositionInBody(pos, body, ignoreTail) {
   return false;
 }
 
-function roomPlayerSummaries(room) {
-  return room.playerOrder.map(function (playerId, index) {
-    const player = room.players.get(playerId);
+function makeIdleSnake() {
+  return {
+    body: [{ x: 0, y: 0 }],
+    direction: { x: 1, y: 0 },
+    nextDirection: { x: 1, y: 0 },
+    alive: true
+  };
+}
+
+function roomAlivePlayers(room) {
+  return room.activePlayerIds.filter(function (playerId) {
     const snake = room.snakes.get(playerId);
+    return snake && snake.alive;
+  });
+}
+
+function ensureRoomOwner(room) {
+  if (room.ownerId && room.members.has(room.ownerId)) {
+    return;
+  }
+  room.ownerId = room.memberOrder.length > 0 ? room.memberOrder[0] : null;
+}
+
+function activateMember(room, memberId) {
+  if (!room.members.has(memberId)) {
+    return false;
+  }
+  if (room.activePlayerIds.indexOf(memberId) !== -1) {
+    return true;
+  }
+  if (room.activePlayerIds.length >= MAX_ACTIVE_PLAYERS) {
+    return false;
+  }
+  room.activePlayerIds.push(memberId);
+  room.snakes.set(memberId, makeIdleSnake());
+  return true;
+}
+
+function promoteWaitingMembers(room) {
+  if (!room || room.state !== 'lobby') {
+    return;
+  }
+
+  for (let i = 0; i < room.memberOrder.length && room.activePlayerIds.length < MAX_ACTIVE_PLAYERS; i += 1) {
+    activateMember(room, room.memberOrder[i]);
+  }
+}
+
+function roomMemberSummaries(room) {
+  const activeSet = new Set(room.activePlayerIds);
+
+  return room.memberOrder.map(function (memberId) {
+    const member = room.members.get(memberId);
+    const snake = room.snakes.get(memberId);
+    const color = getColorById(member && member.colorId) || COLOR_SET[0];
+    const isActive = activeSet.has(memberId);
+
     return {
-      id: playerId,
-      nickname: player ? player.nickname : 'Unbekannt',
-      color: COLOR_SET[index] ? COLOR_SET[index].head : '#ffffff',
-      isOwner: playerId === room.ownerId,
-      alive: snake ? !!snake.alive : true,
-      length: snake && snake.body ? snake.body.length : 1,
-      rematch: room.rematchVotes.has(playerId)
+      id: memberId,
+      nickname: member ? member.nickname : 'Unbekannt',
+      colorId: color.id,
+      color: color.head,
+      bodyColor: color.body,
+      isOwner: memberId === room.ownerId,
+      isActive: isActive,
+      isSpectator: !isActive,
+      alive: isActive ? !!(snake && snake.alive) : false,
+      length: isActive && snake && snake.body ? snake.body.length : 1,
+      rematch: isActive && room.rematchVotes.has(memberId)
     };
   });
 }
 
-function publicRoomState(room) {
+function publicRoomState(room, viewerId) {
   return {
     id: room.id,
     name: room.name,
     ownerId: room.ownerId,
     state: room.state,
-    players: roomPlayerSummaries(room),
+    players: roomMemberSummaries(room),
+    activePlayerCount: room.activePlayerIds.length,
+    maxPlayers: MAX_ACTIVE_PLAYERS,
+    memberCount: room.memberOrder.length,
+    maxMembers: MAX_ROOM_MEMBERS,
     rematchDeadlineTs: room.rematchDeadlineTs || 0,
-    lastResultMessage: room.lastResultMessage || ''
+    lastResultMessage: room.lastResultMessage || '',
+    yourRole: room.activePlayerIds.indexOf(viewerId) !== -1 ? 'player' : 'spectator'
   };
 }
 
 function publicGameState(room) {
   return {
     food: room.food,
-    snakes: room.playerOrder.map(function (playerId, index) {
-      const player = room.players.get(playerId);
+    snakes: room.activePlayerIds.map(function (playerId) {
+      const member = room.members.get(playerId);
       const snake = room.snakes.get(playerId);
+      const color = getColorById(member && member.colorId) || COLOR_SET[0];
       return {
         id: playerId,
-        nickname: player ? player.nickname : 'Unbekannt',
+        nickname: member ? member.nickname : 'Unbekannt',
         body: snake && snake.body ? snake.body : [],
         alive: snake ? !!snake.alive : false,
-        headColor: COLOR_SET[index] ? COLOR_SET[index].head : '#ffffff',
-        bodyColor: COLOR_SET[index] ? COLOR_SET[index].body : '#cccccc'
+        length: snake && snake.body ? snake.body.length : 1,
+        headColor: color.head,
+        bodyColor: color.body
       };
     })
   };
 }
 
+function publicRoomListEntry(room) {
+  const owner = room.members.get(room.ownerId);
+  return {
+    id: room.id,
+    name: room.name,
+    ownerName: owner ? owner.nickname : 'Unbekannt',
+    state: room.state,
+    activePlayerCount: room.activePlayerIds.length,
+    maxPlayers: MAX_ACTIVE_PLAYERS,
+    memberCount: room.memberOrder.length,
+    maxMembers: MAX_ROOM_MEMBERS,
+    canJoin: room.memberOrder.length < MAX_ROOM_MEMBERS
+  };
+}
+
 function broadcastRoomList() {
-  const openRooms = [];
+  const roomEntries = [];
 
   rooms.forEach(function (room) {
-    if (room.state !== 'lobby') {
-      return;
-    }
-    if (room.playerOrder.length >= MAX_PLAYERS) {
-      return;
-    }
-    openRooms.push({
-      id: room.id,
-      name: room.name,
-      ownerName: room.players.get(room.ownerId) ? room.players.get(room.ownerId).nickname : 'Unbekannt',
-      playerCount: room.playerOrder.length,
-      maxPlayers: MAX_PLAYERS
-    });
+    roomEntries.push(publicRoomListEntry(room));
   });
 
-  openRooms.sort(function (a, b) {
+  roomEntries.sort(function (a, b) {
+    if (a.state !== b.state) {
+      const order = { lobby: 0, playing: 1, finished: 2 };
+      return (order[a.state] || 99) - (order[b.state] || 99);
+    }
     return a.name.localeCompare(b.name, 'de');
   });
 
-  broadcast({ type: 'room_list', rooms: openRooms });
+  clients.forEach(function (client) {
+    send(client, { type: 'room_list', rooms: roomEntries });
+  });
 }
 
 function broadcastRoomState(room) {
-  room.playerOrder.forEach(function (playerId) {
-    const client = clients.get(playerId);
+  room.memberOrder.forEach(function (memberId) {
+    const client = clients.get(memberId);
     if (!client) {
       return;
     }
     send(client, {
       type: 'room_state',
-      room: publicRoomState(room)
+      room: publicRoomState(room, memberId)
     });
+  });
+}
 
-    if (room.state === 'playing' || room.state === 'finished') {
-      send(client, {
-        type: 'game_state',
-        state: publicGameState(room)
-      });
-    }
+function broadcastGameState(room) {
+  const payload = {
+    type: 'game_state',
+    state: publicGameState(room)
+  };
+
+  room.memberOrder.forEach(function (memberId) {
+    const client = clients.get(memberId);
+    send(client, payload);
   });
 }
 
@@ -233,23 +354,10 @@ function cleanupRoom(room) {
   rooms.delete(room.id);
 }
 
-function ensureRoomOwner(room) {
-  if (room.ownerId && room.players.has(room.ownerId)) {
-    return;
-  }
-  room.ownerId = room.playerOrder.length > 0 ? room.playerOrder[0] : null;
-}
-
-function roomAlivePlayers(room) {
-  return room.playerOrder.filter(function (playerId) {
-    const snake = room.snakes.get(playerId);
-    return snake && snake.alive;
-  });
-}
-
 function placeFood(room) {
   const taken = new Set();
-  room.playerOrder.forEach(function (playerId) {
+
+  room.activePlayerIds.forEach(function (playerId) {
     const snake = room.snakes.get(playerId);
     if (!snake || !snake.body) {
       return;
@@ -282,8 +390,9 @@ function createRoom(client, roomName) {
     name: sanitizeRoomName(roomName),
     ownerId: client.id,
     state: 'lobby',
-    players: new Map(),
-    playerOrder: [],
+    members: new Map(),
+    memberOrder: [],
+    activePlayerIds: [],
     snakes: new Map(),
     food: null,
     loopId: null,
@@ -294,26 +403,50 @@ function createRoom(client, roomName) {
   };
 
   rooms.set(room.id, room);
-  joinRoomInternal(client, room);
+  joinRoom(client, room.id);
 }
 
-function joinRoomInternal(client, room) {
-  client.roomId = room.id;
-  room.players.set(client.id, {
-    id: client.id,
-    nickname: client.nickname
-  });
-  room.playerOrder.push(client.id);
-  ensureRoomOwner(room);
-  room.snakes.set(client.id, {
-    body: [{ x: 0, y: 0 }],
-    direction: { x: 1, y: 0 },
-    nextDirection: { x: 1, y: 0 },
-    alive: true
-  });
+function addMemberToRoom(client, room) {
+  let colorId;
+  let assignedFallback = false;
 
-  broadcastRoomState(room);
-  broadcastRoomList();
+  colorId = reserveColorId(room, client.preferredColorId, null);
+  if (!colorId) {
+    send(client, { type: 'error', message: 'In diesem Raum ist keine Farbe mehr frei.' });
+    return false;
+  }
+
+  if (client.preferredColorId && client.preferredColorId !== colorId) {
+    assignedFallback = true;
+  }
+
+  client.roomId = room.id;
+  room.members.set(client.id, {
+    id: client.id,
+    nickname: client.nickname,
+    colorId: colorId
+  });
+  room.memberOrder.push(client.id);
+  ensureRoomOwner(room);
+
+  if (room.state === 'lobby' && room.activePlayerIds.length < MAX_ACTIVE_PLAYERS) {
+    activateMember(room, client.id);
+  }
+
+  if (assignedFallback) {
+    const color = getColorById(colorId);
+    send(client, { type: 'info', message: 'Deine Wunschfarbe war belegt. Zugewiesen: ' + (color ? color.label : colorId) + '.' });
+  }
+
+  if (room.state === 'playing') {
+    send(client, { type: 'info', message: 'Das Spiel läuft bereits. Du schaust zunächst zu.' });
+  } else if (room.state === 'finished') {
+    send(client, { type: 'info', message: 'Das Match ist gerade beendet. Du wartest auf die nächste Runde.' });
+  } else if (room.activePlayerIds.indexOf(client.id) === -1) {
+    send(client, { type: 'info', message: 'Die Spielerplätze sind voll. Du wartest in der Lobby auf einen freien Slot.' });
+  }
+
+  return true;
 }
 
 function joinRoom(client, roomId) {
@@ -324,18 +457,23 @@ function joinRoom(client, roomId) {
     return;
   }
 
-  if (room.state !== 'lobby') {
-    send(client, { type: 'error', message: 'Diesem Raum kann gerade nicht beigetreten werden.' });
-    return;
-  }
-
-  if (room.playerOrder.length >= MAX_PLAYERS) {
-    send(client, { type: 'error', message: 'Der Raum ist bereits voll.' });
+  if (room.memberOrder.length >= MAX_ROOM_MEMBERS) {
+    send(client, { type: 'error', message: 'Dieser Raum ist vollständig belegt.' });
     return;
   }
 
   leaveRoom(client, true);
-  joinRoomInternal(client, room);
+
+  if (!addMemberToRoom(client, room)) {
+    client.roomId = null;
+    return;
+  }
+
+  broadcastRoomList();
+  broadcastRoomState(room);
+  if (room.state === 'playing' || room.state === 'finished') {
+    broadcastGameState(room);
+  }
 }
 
 function maybeFinalizeActiveGame(room) {
@@ -345,34 +483,54 @@ function maybeFinalizeActiveGame(room) {
   const alive = roomAlivePlayers(room);
   if (alive.length <= 1) {
     endGame(room, alive.length === 1 ? alive[0] : null);
+  } else {
+    broadcastRoomState(room);
+    broadcastGameState(room);
   }
 }
 
-function removePlayerFromRoom(room, playerId) {
-  const index = room.playerOrder.indexOf(playerId);
-  if (index !== -1) {
-    room.playerOrder.splice(index, 1);
+function removeMemberFromRoom(room, memberId) {
+  const orderIndex = room.memberOrder.indexOf(memberId);
+  const activeIndex = room.activePlayerIds.indexOf(memberId);
+  const wasActive = activeIndex !== -1;
+
+  if (orderIndex !== -1) {
+    room.memberOrder.splice(orderIndex, 1);
+  }
+  if (activeIndex !== -1) {
+    room.activePlayerIds.splice(activeIndex, 1);
   }
 
-  room.players.delete(playerId);
-  room.snakes.delete(playerId);
-  room.rematchVotes.delete(playerId);
+  room.members.delete(memberId);
+  room.snakes.delete(memberId);
+  room.rematchVotes.delete(memberId);
   ensureRoomOwner(room);
 
-  if (room.playerOrder.length === 0) {
+  if (room.memberOrder.length === 0) {
     cleanupRoom(room);
     broadcastRoomList();
     return;
   }
 
-  if (room.state === 'playing') {
+  if (room.state === 'playing' && wasActive) {
     maybeFinalizeActiveGame(room);
-  } else if (room.state === 'finished') {
-    maybeProcessRematch(room);
+    broadcastRoomList();
+    return;
   }
 
-  broadcastRoomState(room);
+  if (room.state === 'lobby') {
+    promoteWaitingMembers(room);
+  }
+
+  if (room.state === 'finished' && room.activePlayerIds.length < 2) {
+    room.rematchVotes.clear();
+  }
+
   broadcastRoomList();
+  broadcastRoomState(room);
+  if (room.state === 'playing' || room.state === 'finished') {
+    broadcastGameState(room);
+  }
 }
 
 function leaveRoom(client, silent) {
@@ -387,7 +545,7 @@ function leaveRoom(client, silent) {
     return;
   }
 
-  removePlayerFromRoom(room, client.id);
+  removeMemberFromRoom(room, client.id);
 
   if (!silent) {
     send(client, { type: 'room_state', room: null });
@@ -395,10 +553,10 @@ function leaveRoom(client, silent) {
 }
 
 function startGame(room) {
-  const playerCount = room.playerOrder.length;
+  promoteWaitingMembers(room);
 
-  if (playerCount < 2) {
-    return;
+  if (room.activePlayerIds.length < 2) {
+    return false;
   }
 
   room.state = 'playing';
@@ -411,7 +569,11 @@ function startGame(room) {
     room.rematchTimer = null;
   }
 
-  room.playerOrder.forEach(function (playerId, index) {
+  room.activePlayerIds = room.activePlayerIds.filter(function (memberId) {
+    return room.members.has(memberId);
+  }).slice(0, MAX_ACTIVE_PLAYERS);
+
+  room.activePlayerIds.forEach(function (playerId, index) {
     const spawn = SPAWNS[index];
     room.snakes.set(playerId, {
       body: [{ x: spawn.x, y: spawn.y }],
@@ -432,6 +594,8 @@ function startGame(room) {
 
   broadcastRoomList();
   broadcastRoomState(room);
+  broadcastGameState(room);
+  return true;
 }
 
 function endGame(room, winnerId) {
@@ -444,8 +608,8 @@ function endGame(room, winnerId) {
   room.rematchVotes.clear();
   room.rematchDeadlineTs = Date.now() + 5000;
 
-  if (winnerId && room.players.get(winnerId)) {
-    room.lastResultMessage = room.players.get(winnerId).nickname + ' gewinnt!';
+  if (winnerId && room.members.get(winnerId)) {
+    room.lastResultMessage = room.members.get(winnerId).nickname + ' gewinnt!';
   } else {
     room.lastResultMessage = 'Unentschieden!';
   }
@@ -460,6 +624,7 @@ function endGame(room, winnerId) {
 
   broadcastRoomList();
   broadcastRoomState(room);
+  broadcastGameState(room);
 }
 
 function maybeProcessRematch(room) {
@@ -467,7 +632,9 @@ function maybeProcessRematch(room) {
     return;
   }
 
-  if (room.playerOrder.length >= 2 && room.rematchVotes.size === room.playerOrder.length) {
+  if (room.activePlayerIds.length >= 2 && room.activePlayerIds.every(function (playerId) {
+    return room.rematchVotes.has(playerId);
+  })) {
     if (room.rematchTimer) {
       clearTimeout(room.rematchTimer);
       room.rematchTimer = null;
@@ -484,7 +651,9 @@ function finalizeRematch(roomId) {
 
   room.rematchTimer = null;
 
-  if (room.playerOrder.length >= 2 && room.rematchVotes.size === room.playerOrder.length) {
+  if (room.activePlayerIds.length >= 2 && room.activePlayerIds.every(function (playerId) {
+    return room.rematchVotes.has(playerId);
+  })) {
     startGame(room);
     return;
   }
@@ -493,14 +662,16 @@ function finalizeRematch(roomId) {
   room.lastResultMessage = '';
   room.rematchVotes.clear();
   room.rematchDeadlineTs = 0;
-  room.snakes = new Map(room.playerOrder.map(function (playerId) {
-    return [playerId, {
-      body: [{ x: 0, y: 0 }],
-      direction: { x: 1, y: 0 },
-      nextDirection: { x: 1, y: 0 },
-      alive: true
-    }];
-  }));
+
+  room.snakes = new Map();
+  room.activePlayerIds = room.activePlayerIds.filter(function (memberId) {
+    return room.members.has(memberId);
+  });
+
+  promoteWaitingMembers(room);
+  room.activePlayerIds.forEach(function (playerId) {
+    room.snakes.set(playerId, makeIdleSnake());
+  });
 
   broadcastRoomList();
   broadcastRoomState(room);
@@ -511,7 +682,7 @@ function setPlayerDirection(client, directionName) {
   const snake = room ? room.snakes.get(client.id) : null;
   const nextDirection = directionFromName(directionName);
 
-  if (!room || room.state !== 'playing' || !snake || !snake.alive || !nextDirection) {
+  if (!room || room.state !== 'playing' || room.activePlayerIds.indexOf(client.id) === -1 || !snake || !snake.alive || !nextDirection) {
     return;
   }
 
@@ -534,7 +705,7 @@ function tickRoom(roomId) {
     return;
   }
 
-  room.playerOrder.forEach(function (playerId) {
+  room.activePlayerIds.forEach(function (playerId) {
     const snake = room.snakes.get(playerId);
     if (!snake || !snake.alive) {
       return;
@@ -552,8 +723,8 @@ function tickRoom(roomId) {
     dead[playerId] = false;
   });
 
-  for (let i = 0; i < aliveIds.length; i++) {
-    for (let j = i + 1; j < aliveIds.length; j++) {
+  for (let i = 0; i < aliveIds.length; i += 1) {
+    for (let j = i + 1; j < aliveIds.length; j += 1) {
       const a = aliveIds[i];
       const b = aliveIds[j];
 
@@ -574,7 +745,7 @@ function tickRoom(roomId) {
       return;
     }
 
-    room.playerOrder.forEach(function (targetId) {
+    room.activePlayerIds.forEach(function (targetId) {
       const targetSnake = room.snakes.get(targetId);
       const ignoreTail = playerId !== targetId ? !ateFood[targetId] : !ateFood[playerId];
 
@@ -615,15 +786,75 @@ function tickRoom(roomId) {
     return;
   }
 
+  broadcastGameState(room);
+}
+
+function updateClientProfile(client, nickname, colorId) {
+  let room;
+  let member;
+  let reservedColor;
+  let colorChanged = false;
+
+  client.nickname = sanitizeNickname(nickname || client.nickname);
+  if (getColorById(colorId)) {
+    client.preferredColorId = colorId;
+  }
+
+  room = client.roomId ? rooms.get(client.roomId) : null;
+  if (!room) {
+    return;
+  }
+
+  member = room.members.get(client.id);
+  if (!member) {
+    return;
+  }
+
+  member.nickname = client.nickname;
+
+  if (client.preferredColorId) {
+    reservedColor = reserveColorId(room, client.preferredColorId, client.id);
+
+    if (!reservedColor) {
+      send(client, { type: 'error', message: 'In diesem Raum ist aktuell keine freie Farbe verfügbar.' });
+    } else if (reservedColor !== client.preferredColorId && member.colorId !== client.preferredColorId) {
+      send(client, { type: 'error', message: 'Diese Farbe ist in diesem Raum bereits belegt.' });
+    } else if (member.colorId !== reservedColor) {
+      member.colorId = reservedColor;
+      colorChanged = true;
+    }
+  }
+
+  broadcastRoomList();
   broadcastRoomState(room);
+  if (room.state === 'playing' || room.state === 'finished' || colorChanged) {
+    broadcastGameState(room);
+  }
 }
 
 function handleMessage(client, message) {
   let room;
 
+  client.ws.isAlive = true;
+  client.lastSeenTs = Date.now();
+
   if (message.type === 'hello') {
     client.nickname = sanitizeNickname(message.nickname);
-    send(client, { type: 'self', playerId: client.id });
+    if (getColorById(message.colorId)) {
+      client.preferredColorId = message.colorId;
+    }
+    send(client, {
+      type: 'self',
+      playerId: client.id,
+      colors: COLOR_SET.map(function (color) {
+        return {
+          id: color.id,
+          label: color.label,
+          head: color.head,
+          body: color.body
+        };
+      })
+    });
     broadcastRoomList();
     return;
   }
@@ -633,14 +864,25 @@ function handleMessage(client, message) {
     return;
   }
 
+  if (message.type === 'set_profile') {
+    updateClientProfile(client, message.nickname, message.colorId);
+    return;
+  }
+
   if (message.type === 'create_room') {
     client.nickname = sanitizeNickname(message.nickname || client.nickname);
+    if (getColorById(message.colorId)) {
+      client.preferredColorId = message.colorId;
+    }
     createRoom(client, message.roomName);
     return;
   }
 
   if (message.type === 'join_room') {
     client.nickname = sanitizeNickname(message.nickname || client.nickname);
+    if (getColorById(message.colorId)) {
+      client.preferredColorId = message.colorId;
+    }
     joinRoom(client, String(message.roomId || '').trim());
     return;
   }
@@ -668,8 +910,9 @@ function handleMessage(client, message) {
       send(client, { type: 'error', message: 'Nur der Ersteller kann das Spiel starten.' });
       return;
     }
-    if (room.playerOrder.length < 2) {
-      send(client, { type: 'error', message: 'Mindestens 2 Spieler werden benötigt.' });
+    promoteWaitingMembers(room);
+    if (room.activePlayerIds.length < 2) {
+      send(client, { type: 'error', message: 'Mindestens 2 aktive Spieler werden benötigt.' });
       return;
     }
     startGame(room);
@@ -685,6 +928,9 @@ function handleMessage(client, message) {
     if (room.state !== 'finished') {
       return;
     }
+    if (room.activePlayerIds.indexOf(client.id) === -1) {
+      return;
+    }
     room.rematchVotes.add(client.id);
     broadcastRoomState(room);
     maybeProcessRematch(room);
@@ -693,7 +939,7 @@ function handleMessage(client, message) {
 
 const server = http.createServer(function (req, res) {
   const requestPath = req.url === '/' ? '/index.html' : req.url;
-  const safePath = path.normalize(requestPath).replace(/^\.\.(\/|\\|$)/, '');
+  const safePath = path.normalize(requestPath).replace(/^(\.\.[/\\])+/, '');
   const filePath = path.join(PUBLIC_DIR, safePath);
 
   if (!filePath.startsWith(PUBLIC_DIR)) {
@@ -722,12 +968,32 @@ wss.on('connection', function (ws) {
     id: randomId(8),
     ws: ws,
     nickname: 'Spieler' + Math.floor(Math.random() * 900 + 100),
-    roomId: null
+    preferredColorId: COLOR_SET[0].id,
+    roomId: null,
+    lastSeenTs: Date.now()
   };
 
+  ws.isAlive = true;
   clients.set(client.id, client);
-  send(client, { type: 'self', playerId: client.id });
+
+  send(client, {
+    type: 'self',
+    playerId: client.id,
+    colors: COLOR_SET.map(function (color) {
+      return {
+        id: color.id,
+        label: color.label,
+        head: color.head,
+        body: color.body
+      };
+    })
+  });
   broadcastRoomList();
+
+  ws.on('pong', function () {
+    ws.isAlive = true;
+    client.lastSeenTs = Date.now();
+  });
 
   ws.on('message', function (rawMessage) {
     let message;
@@ -744,6 +1010,26 @@ wss.on('connection', function (ws) {
     clients.delete(client.id);
     broadcastRoomList();
   });
+});
+
+const heartbeatInterval = setInterval(function () {
+  wss.clients.forEach(function (ws) {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      return;
+    }
+
+    ws.isAlive = false;
+    try {
+      ws.ping();
+    } catch (e) {
+      ws.terminate();
+    }
+  });
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on('close', function () {
+  clearInterval(heartbeatInterval);
 });
 
 server.listen(PORT, function () {
